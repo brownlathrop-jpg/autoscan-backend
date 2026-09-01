@@ -1,42 +1,100 @@
+// ÐÐ²Ñ‚Ð¾Ð¡ÐºÐ°Ð½ â€” Ð±ÑÐºÐµÐ½Ð´ v2 (Ñ€ÐµÐ°Ð»ÑŒÐ½Ñ‹Ðµ Ð·Ð°Ð¿Ñ€Ð¾ÑÑ‹ Ðº Ð“Ð˜Ð‘Ð”Ð”)
 const express = require("express");
 const cors = require("cors");
+const axios = require("axios");
 
 const app = express();
-
-// Ðàçðåøàåì çàïðîñû ñ ôðîíòåíäà
 app.use(cors());
 app.use(express.json());
 
-// 1) Ïðîâåðêà æèâîñòè
-app.get("/health", (req, res) => {
-  res.json({ ok: true });
-});
+const GIBDD = "https://xn--90adear.xn--p1ai";
+const HEADERS = {
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+  "Accept": "application/json, text/javascript, */*; q=0.01",
+  "X-Requested-With": "XMLHttpRequest",
+  "Origin": GIBDD,
+  "Referer": GIBDD + "/check/auto/",
+  "Accept-Language": "ru-RU,ru;q=0.9"
+};
 
-// 2) Îñíîâíàÿ ïðîâåðêà àâòî
-app.post("/api/check", (req, res) => {
-  const vin = (req.body.vin || "").toUpperCase();
-  const plate = req.body.plate || "";
+// ÐºÑÑˆ Ð½Ð° 10 Ð¼Ð¸Ð½ÑƒÑ‚, Ñ‡Ñ‚Ð¾Ð±Ñ‹ Ð½Ðµ Ð´Ñ‘Ñ€Ð³Ð°Ñ‚ÑŒ Ð¸ÑÑ‚Ð¾Ñ‡Ð½Ð¸ÐºÐ¸ Ð¿Ð¾ 100 Ñ€Ð°Ð·
+const cache = new Map();
 
-  // Ïîêà çàãëóøêà — ïîòîì ïîäêëþ÷èì ðåàëüíûå èñòî÷íèêè
-  res.json({
-    vin: vin || null,
-    plate: plate || null,
-    source: "live",
-    dtp: { count: 0, items: [] },
-    wanted: false,
-    restrictions: [],
-    pledge: null,
-    mileage: [],
-    owners: 0,
-    taxi: false,
-    osago: { active: false },
-    utilization: false,
-    score: 100
+function asArray(x) { return Array.isArray(x) ? x : (x && x.records) || []; }
+
+async function gibdd(path) {
+  const r = await axios.post(GIBDD + path, {}, {
+    headers: HEADERS, timeout: 15000, validateStatus: () => true
   });
+  return r.data;
+}
+
+async function doCheck(vin) {
+  const cached = cache.get(vin);
+  if (cached && Date.now() - cached.time < 10 * 60 * 1000) return cached.data;
+
+  const out = {
+    vin: vin, source: "live",
+    dtp: { count: 0, items: [] },
+    wanted: false, restrictions: [], pledge: null,
+    mileage: [], owners: 0, taxi: false,
+    osago: { active: false }, utilization: false,
+    warnings: []
+  };
+
+  // 1) ÐÐ²Ñ‚Ð¾ + Ð”Ð¢ÐŸ
+  try {
+    const g = await gibdd("/proxy/check/auto/" + vin);
+    const acc = asArray(g && (g.Accidents || g.accidents));
+    out.dtp.count = acc.length;
+    out.dtp.items = acc.map(a => ({
+      date: a.AccidentDateTime || a.date || "",
+      type: a.AccidentType || a.type || "Ð”Ð¢ÐŸ",
+      region: a.RegionName || a.region || ""
+    }));
+    const restr = asArray(g && (g.Restrictions || g.restrictions));
+    if (restr.length) out.restrictions = restr.map(x => x.ogrk || "Ð¾Ð³Ñ€Ð°Ð½Ð¸Ñ‡ÐµÐ½Ð¸Ðµ");
+    if (g && (g.captcha || g.Captcha)) out.warnings.push("Ð“Ð˜Ð‘Ð”Ð” Ð·Ð°Ð¿Ñ€Ð¾ÑÐ¸Ð»Ð° ÐºÐ°Ð¿Ñ‡Ñƒ â€” Ð¿Ð¾Ð¿Ñ€Ð¾Ð±ÑƒÐ¹Ñ‚Ðµ Ð¿Ð¾Ð·Ð¶Ðµ");
+  } catch (e) { out.warnings.push("Ð“Ð˜Ð‘Ð”Ð” (Ð”Ð¢ÐŸ): " + e.message); }
+
+  // 2) Ð Ð¾Ð·Ñ‹ÑÐº
+  try {
+    const w = await gibdd("/proxy/check/auto/" + vin + "/wanted");
+    if (asArray(w).length) out.wanted = true;
+  } catch (e) { out.warnings.push("Ð“Ð˜Ð‘Ð”Ð” (Ñ€Ð¾Ð·Ñ‹ÑÐº): " + e.message); }
+
+  // 3) ÐžÐ³Ñ€Ð°Ð½Ð¸Ñ‡ÐµÐ½Ð¸Ñ
+  try {
+    const r = await gibdd("/proxy/check/auto/" + vin + "/restricted");
+    const list = asArray(r);
+    if (list.length) out.restrictions = list.map(x => x.ogrk || "Ð¾Ð³Ñ€Ð°Ð½Ð¸Ñ‡ÐµÐ½Ð¸Ðµ");
+  } catch (e) { out.warnings.push("Ð“Ð˜Ð‘Ð”Ð” (Ð¾Ð³Ñ€Ð°Ð½Ð¸Ñ‡ÐµÐ½Ð¸Ñ): " + e.message); }
+
+  // Ð¸Ð½Ð´ÐµÐºÑ Ð½Ð°Ð´Ñ‘Ð¶Ð½Ð¾ÑÑ‚Ð¸
+  let score = 100;
+  score -= Math.min(36, out.dtp.count * 12);
+  if (out.wanted) score -= 40;
+  if (out.restrictions.length) score -= 15;
+  out.score = Math.max(0, Math.min(100, score));
+
+  cache.set(vin, { time: Date.now(), data: out });
+  return out;
+}
+
+app.get("/health", (req, res) => res.json({ ok: true }));
+
+// ÑƒÐ´Ð¾Ð±Ð½Ð¾ ÑÐ¼Ð¾Ñ‚Ñ€ÐµÑ‚ÑŒ Ð² Ð±Ñ€Ð°ÑƒÐ·ÐµÑ€Ðµ: /api/check?vin=...
+app.get("/api/check", async (req, res) => {
+  const vin = String(req.query.vin || "").toUpperCase().trim();
+  if (!/^[A-HJ-NPR-Z0-9]{17}$/.test(vin)) return res.status(400).json({ error: "bad vin" });
+  res.json(await doCheck(vin));
 });
 
-// ÂÀÆÍÎ: Railway ñàì íàçíà÷àåò ïîðò ÷åðåç ïåðåìåííóþ PORT
-const port = process.env.PORT || 8787;
-app.listen(port, () => {
-  console.log("ÀâòîÑêàí-áýêåíä çàïóùåí íà ïîðòó " + port);
+app.post("/api/check", async (req, res) => {
+  const vin = String(req.body.vin || "").toUpperCase().trim();
+  if (!/^[A-HJ-NPR-Z0-9]{17}$/.test(vin)) return res.status(400).json({ error: "bad vin" });
+  res.json(await doCheck(vin));
 });
+
+const port = process.env.PORT || 8080;
+app.listen(port, () => console.log("Autoscan backend v2 listening on " + port));
