@@ -43,4 +43,58 @@ async function doCheck(vin) {
     const acc = asArray(g.Accidents || g.accidents);
     out.dtp.count = acc.length;
     out.dtp.items = acc.map(function (a) { return { date: a.AccidentDateTime || a.date || "", type: a.AccidentType || a.type || "ДТП", region: a.RegionName || a.region || "" }; });
-    const restr = asArray(g
+    const restr = asArray(g.Restrictions || g.restrictions);
+    if (restr.length) out.restrictions = restr.map(function (x) { return x.ogrk || "ограничение"; });
+    if (g.captcha || g.Captcha) out.warnings.push("ГИБДД запросила капчу — попробуйте позже");
+  } else out.warnings.push("ГИБДД (ДТП) не ответила");
+
+  const w = await gibdd("/proxy/check/auto/" + vin + "/wanted");
+  if (w && asArray(w).length) out.wanted = true;
+
+  const r = await gibdd("/proxy/check/auto/" + vin + "/restricted");
+  if (r) { const list = asArray(r); if (list.length) out.restrictions = list.map(function (x) { return x.ogrk || "ограничение"; }); }
+
+  let score = 100;
+  score -= Math.min(36, out.dtp.count * 12);
+  if (out.wanted) score -= 40;
+  if (out.restrictions.length) score -= 15;
+  out.score = Math.max(0, Math.min(100, score));
+
+  cache.set(vin, { time: Date.now(), data: out });
+  return out;
+}
+
+function json(res, obj, code) {
+  res.writeHead(code || 200, { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "Content-Type", "Access-Control-Allow-Methods": "GET,POST,OPTIONS" });
+  res.end(JSON.stringify(obj));
+}
+
+const VIN_RE = /^[A-HJ-NPR-Z0-9]{17}$/;
+
+const server = http.createServer(function (req, res) {
+  let url;
+  try { url = new URL(req.url, "http://localhost"); } catch (e) { json(res, { error: "bad url" }, 400); return; }
+  if (req.method === "OPTIONS") { json(res, { ok: true }); return; }
+  if (url.pathname === "/health") { json(res, { ok: true }); return; }
+  if (url.pathname === "/api/check") {
+    if (req.method === "GET") {
+      const vin = (url.searchParams.get("vin") || "").toUpperCase().trim();
+      if (!VIN_RE.test(vin)) { json(res, { error: "bad vin" }, 400); return; }
+      doCheck(vin).then(function (d) { json(res, d); });
+      return;
+    }
+    let body = "";
+    req.on("data", function (c) { body += c; });
+    req.on("end", function () {
+      let vin = "";
+      try { vin = (JSON.parse(body).vin || "").toUpperCase().trim(); } catch (e) {}
+      if (!VIN_RE.test(vin)) { json(res, { error: "bad vin" }, 400); return; }
+      doCheck(vin).then(function (d) { json(res, d); });
+    });
+    return;
+  }
+  json(res, { error: "not found" }, 404);
+});
+
+const port = process.env.PORT || 3100;
+server.listen(port, function () { console.log("Autoscan backend v3 listening on " + port); });
