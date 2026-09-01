@@ -96,5 +96,5 @@ app.post("/api/check", async (req, res) => {
   res.json(await doCheck(vin));
 });
 
-const port = process.env.PORT || 8080;
+const port = process.env.PORT || 3100;
 app.listen(port, () => console.log("Autoscan backend v2 listening on " + port));
