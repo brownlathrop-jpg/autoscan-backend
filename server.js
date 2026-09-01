@@ -1,4 +1,4 @@
-// АвтоСкан — бэкенд v3 (без npm-зависимостей)
+// АвтоСкан — бэкенд v4 (следует редиректам + само-диагностика)
 const http = require("http");
 const https = require("https");
 
@@ -14,22 +14,36 @@ const HEADERS = {
 
 function asArray(x) { return Array.isArray(x) ? x : (x && x.records) || []; }
 
-function gibdd(path) {
+function postJson(urlStr, depth, meta) {
   return new Promise(function (resolve) {
     try {
-      const req = https.request({ host: GIBDD_HOST, path: path, method: "POST", headers: Object.assign({}, HEADERS, { "Content-Length": 2 }), timeout: 15000 }, function (res) {
+      const u = new URL(urlStr);
+      const req = https.request({ host: u.hostname, path: u.pathname + u.search, method: "POST", headers: Object.assign({}, HEADERS, { "Content-Length": 2 }), timeout: 15000 }, function (res) {
+        if ((res.statusCode === 301 || res.statusCode === 302 || res.statusCode === 307 || res.statusCode === 308) && res.headers.location && depth < 3) {
+          let next = res.headers.location;
+          if (next.charAt(0) === "/") next = u.origin + next;
+          meta.last = res.statusCode + " -> " + next;
+          res.resume();
+          postJson(next, depth + 1, meta).then(resolve);
+          return;
+        }
+        meta.last = "status " + res.statusCode;
         let body = "";
         res.on("data", function (c) { body += c; });
         res.on("end", function () {
-          try { resolve(JSON.parse(body)); } catch (e) { resolve(null); }
+          let parsed = null;
+          try { parsed = JSON.parse(body); } catch (e) { meta.raw = body.slice(0, 120); }
+          resolve({ data: parsed, meta: meta });
         });
       });
-      req.on("timeout", function () { req.destroy(); resolve(null); });
-      req.on("error", function () { resolve(null); });
+      req.on("timeout", function () { req.destroy(); meta.last = "timeout"; resolve({ data: null, meta: meta }); });
+      req.on("error", function (e) { meta.last = "err " + e.message; resolve({ data: null, meta: meta }); });
       req.end("{}");
-    } catch (e) { resolve(null); }
+    } catch (e) { meta.last = "err " + e.message; resolve({ data: null, meta: meta }); }
   });
 }
+
+function gibdd(path) { return postJson("https://" + GIBDD_HOST + path, 0, {}); }
 
 const cache = new Map();
 
@@ -38,21 +52,24 @@ async function doCheck(vin) {
   if (cached && Date.now() - cached.time < 10 * 60 * 1000) return cached.data;
   const out = { vin: vin, source: "live", dtp: { count: 0, items: [] }, wanted: false, restrictions: [], pledge: null, mileage: [], owners: 0, taxi: false, osago: { active: false }, utilization: false, warnings: [] };
 
-  const g = await gibdd("/proxy/check/auto/" + vin);
-  if (g) {
+  const g1 = await gibdd("/proxy/check/auto/" + vin);
+  if (g1.data) {
+    const g = g1.data;
     const acc = asArray(g.Accidents || g.accidents);
     out.dtp.count = acc.length;
     out.dtp.items = acc.map(function (a) { return { date: a.AccidentDateTime || a.date || "", type: a.AccidentType || a.type || "ДТП", region: a.RegionName || a.region || "" }; });
     const restr = asArray(g.Restrictions || g.restrictions);
     if (restr.length) out.restrictions = restr.map(function (x) { return x.ogrk || "ограничение"; });
     if (g.captcha || g.Captcha) out.warnings.push("ГИБДД запросила капчу — попробуйте позже");
-  } else out.warnings.push("ГИБДД (ДТП) не ответила");
+  } else {
+    out.warnings.push("ГИБДД (ДТП): " + (g1.meta.last || "нет ответа") + (g1.meta.raw ? " | " + g1.meta.raw : ""));
+  }
 
-  const w = await gibdd("/proxy/check/auto/" + vin + "/wanted");
-  if (w && asArray(w).length) out.wanted = true;
+  const w1 = await gibdd("/proxy/check/auto/" + vin + "/wanted");
+  if (w1.data && asArray(w1.data).length) out.wanted = true;
 
-  const r = await gibdd("/proxy/check/auto/" + vin + "/restricted");
-  if (r) { const list = asArray(r); if (list.length) out.restrictions = list.map(function (x) { return x.ogrk || "ограничение"; }); }
+  const r1 = await gibdd("/proxy/check/auto/" + vin + "/restricted");
+  if (r1.data) { const list = asArray(r1.data); if (list.length) out.restrictions = list.map(function (x) { return x.ogrk || "ограничение"; }); }
 
   let score = 100;
   score -= Math.min(36, out.dtp.count * 12);
@@ -97,4 +114,4 @@ const server = http.createServer(function (req, res) {
 });
 
 const port = process.env.PORT || 3100;
-server.listen(port, function () { console.log("Autoscan backend v3 listening on " + port); });
+server.listen(port, function () { console.log("Autoscan backend v4 listening on " + port); });
